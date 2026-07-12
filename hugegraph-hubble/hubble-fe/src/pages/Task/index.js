@@ -1,0 +1,406 @@
+/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with this
+ * work for additional information regarding copyright ownership. The ASF
+ * licenses this file to You under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ */
+
+import {
+    Button,
+    Row,
+    Col,
+    PageHeader,
+    Input,
+    Modal,
+    Table,
+    Space,
+    Tooltip,
+    message,
+    Badge,
+    Spin,
+} from 'antd';
+import {
+    EditOutlined,
+    DeleteOutlined,
+    FileTextOutlined,
+    PauseOutlined,
+    CaretRightOutlined,
+    LineChartOutlined,
+} from '@ant-design/icons';
+import {useState, useEffect, useCallback} from 'react';
+import {useTranslation} from 'react-i18next';
+import style from './index.module.scss';
+import EditLayer from './components/EditLayer';
+import ViewLayer from './components/ViewLayer';
+import TopStatistic from './components/TopStatistic';
+import {useNavigate, Link} from 'react-router-dom';
+import * as api from '../../api';
+import {StatusField} from '../../components/Status';
+import {sourceType, syncType} from './config';
+import TableHeader from '../../components/TableHeader';
+
+const DetailTip = ({row}) => {
+    const {t} = useTranslation();
+    const {job_summary} = row;
+
+    return (
+        <Link to={`/task/detail/${row.task_id}`}>
+            <Tooltip
+                title={(
+                    <div className={style.task_detail}>
+                        <div>{t('task.detail.title')}</div>
+                        <Space>
+                            <Badge
+                                status="success"
+                                text={(
+                                    <span>
+                                        {t('task.detail.success')}:
+                                        {job_summary?.success_count ?? 0}
+                                    </span>
+                                )}
+                            />
+                            <Badge
+                                status="error"
+                                text={(
+                                    <span>
+                                        {t('task.detail.failed')}:
+                                        {job_summary?.failed_count ?? 0}
+                                    </span>
+                                )}
+                            />
+                            <Badge
+                                status="processing"
+                                text={(
+                                    <span>
+                                        {t('task.detail.running')}:
+                                        {job_summary?.running_count ?? 0}
+                                    </span>
+                                )}
+                            />
+                        </Space>
+                    </div>)
+                }
+            >
+                <LineChartOutlined />
+            </Tooltip>
+        </Link>
+    );
+};
+
+const RunningText = ({status, onClick, data}) => {
+    const {t} = useTranslation();
+    const handleClick = useCallback(() => {
+        onClick(data);
+    }, [onClick, data]);
+
+    return status === 'enable' ? (
+        <Tooltip title={t('task.pause')}><PauseOutlined onClick={handleClick} /></Tooltip>
+    ) : (
+        <Tooltip title={t('task.execute')}><CaretRightOutlined onClick={handleClick} /></Tooltip>
+    );
+};
+
+const TaskActions = ({row, onView, onEdit, onEnable, onDisable, onDelete}) => {
+    const {t} = useTranslation();
+    const canEditOrDelete = row.task_schedule_status === 'DISABLE';
+    const handleView = useCallback(() => onView(row), [onView, row]);
+    const handleEdit = useCallback(() => onEdit(row), [onEdit, row]);
+    const handleDelete = useCallback(() => {
+        Modal.confirm({
+            title: t('common.confirm.delete'),
+            content: t('common.confirm.delete_irrecoverable'),
+            onOk: () => onDelete(row.task_id),
+        });
+    }, [onDelete, row.task_id, t]);
+
+    return (
+        <Space>
+            <DetailTip row={row} />
+            <Button
+                type='link'
+                aria-label={t('task.action.config')}
+                title={t('task.action.config')}
+                icon={<FileTextOutlined />}
+                onClick={handleView}
+            />
+            <Button
+                type='link'
+                aria-label={t('task.action.edit')}
+                title={t('task.action.edit')}
+                icon={<EditOutlined />}
+                disabled={!canEditOrDelete}
+                onClick={handleEdit}
+            />
+            {row.task_schedule_status === 'ENABLE'
+                ? (
+                    <RunningText
+                        status='enable'
+                        data={row.task_id}
+                        onClick={onDisable}
+                    />)
+                : <RunningText data={row.task_id} onClick={onEnable} />}
+            <Button
+                type='link'
+                aria-label={t('common.action.delete')}
+                title={t('common.action.delete')}
+                icon={<DeleteOutlined />}
+                disabled={!canEditOrDelete}
+                onClick={handleDelete}
+            />
+        </Space>
+    );
+};
+
+
+const Task = () => {
+    const {t} = useTranslation();
+    const [data, setData] = useState([]);
+    const [searchName, setSearchName] = useState('');
+    const [editLayer, setEditLayer] = useState(false);
+    const [viewLayer, setViewLayer] = useState(false);
+    const [refresh, setRefresh] = useState(false);
+    const [detail, setDetail] = useState({});
+    const [pagination, setPagination] = useState({pageSize: 10, current: 1});
+    const [metricsData, setMetricsData] = useState({});
+    const [loading, setLoading] = useState(false);
+    const navigate = useNavigate();
+    const sourceTypes = sourceType(t);
+    const syncTypes = syncType(t);
+
+    const search = useCallback(val => {
+        setSearchName(val);
+        setPagination({...pagination, current: 1});
+    }, [pagination]);
+
+    const handleTable = useCallback(newPagination => {
+        setPagination(newPagination);
+    }, []);
+
+    const enableTask = useCallback(id => {
+        api.manage.enableTask(id).then(res => {
+            if (res.status === 200) {
+                setRefresh(!refresh);
+                message.success(t('common.msg.enable_success'));
+
+                return;
+            }
+
+            message.error(t('common.msg.enable_fail'));
+        });
+    }, [refresh, t]);
+
+    const disableTask = useCallback(id => {
+        api.manage.disableTask(id).then(res => {
+            if (res.status === 200) {
+                setRefresh(!refresh);
+                message.success(t('common.msg.disable_success'));
+
+                return;
+            }
+
+            message.error(t('common.msg.disable_fail'));
+        });
+    }, [refresh, t]);
+
+    const deleteTask = useCallback(id => {
+        setLoading(true);
+        api.manage.deleteTask(id).then(res => {
+            setLoading(false);
+            if (res.status === 200) {
+                setRefresh(!refresh);
+                message.success(t('common.msg.delete_success'));
+
+                return;
+            }
+
+            message.error(t('common.msg.delete_fail'));
+        });
+    }, [refresh, t]);
+
+    const editTask = useCallback(row => {
+        setDetail(row);
+        setEditLayer(true);
+    }, []);
+
+    const viewTask = useCallback(row => {
+        setDetail(row);
+        setViewLayer(true);
+    }, []);
+
+    const handleBack = useCallback(() => {
+        navigate('/task/edit');
+    }, [navigate]);
+
+    const handleRefresh = useCallback(() => {
+        setRefresh(!refresh);
+    }, [refresh]);
+
+    const handleHideEditLayer = useCallback(() => setEditLayer(false), []);
+
+    const handleHideViewLayer = useCallback(() => setViewLayer(false), []);
+
+    const rowKey = useCallback(record => record.task_id, []);
+
+    const columns = [
+        {
+            title: t('task.col.name'),
+            dataIndex: 'task_name',
+        },
+        {
+            title: t('task.col.source_type'),
+            dataIndex: 'ingestion_mapping',
+            render: val => {
+                const {structs} = val ?? {};
+                if (!structs?.length) {
+                    return t('common.label.unknown');
+                }
+                const type = structs[0]?.input?.type;
+                return sourceTypes.find(item => item.value === type)?.label
+                       ?? t('common.label.unknown');
+            },
+        },
+        {
+            title: t('task.col.target_space'),
+            dataIndex: 'ingestion_option',
+            render: val => val.graphspace,
+        },
+        {
+            title: t('task.col.target_graph'),
+            dataIndex: 'ingestion_option',
+            render: val => val.graph,
+        },
+        {
+            title: t('task.col.create_time'),
+            dataIndex: 'create_time',
+        },
+        {
+            title: t('account.col.id'),
+            dataIndex: 'creator',
+        },
+        {
+            title: t('task.col.status'),
+            dataIndex: 'last_metrics',
+            align: 'center',
+            width: 120,
+            render: val => <StatusField status={val} />,
+        },
+        {
+            title: t('task.col.sync_type'),
+            dataIndex: 'task_schedule_type',
+            render: val => {
+                return syncTypes.find(item => item.value === val)?.label ?? val;
+            },
+        },
+        {
+            title: t('graphspace.col.operation'),
+            align: 'center',
+            width: 160,
+            render: row => {
+                return (
+                    <TaskActions
+                        row={row}
+                        onView={viewTask}
+                        onEdit={editTask}
+                        onEnable={enableTask}
+                        onDisable={disableTask}
+                        onDelete={deleteTask}
+                    />
+                );
+            },
+        },
+    ];
+
+    useEffect(() => {
+        api.manage.getTaskList({
+            query: searchName,
+            page_no: pagination.current,
+        }).then(res => {
+            if (res.status === 200) {
+                setData(res.data.records);
+                setPagination({...pagination, total: res.data.total, pageSize: res.data.size});
+                return;
+            }
+
+            message.error(res.message);
+        });
+
+        api.manage.getMetricsTask().then(res => {
+            if (res.status === 200) {
+                setMetricsData(res.data);
+                return;
+            }
+
+            message.error(res.message);
+        });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [searchName, refresh, pagination.current]);
+
+    useEffect(() => {
+        let id = setInterval(() => {
+            setRefresh(val => !val);
+        }, 12000);
+
+        return () => clearInterval(id);
+    }, []);
+
+    return (
+        <>
+            <PageHeader
+                ghost={false}
+                onBack={false}
+                title={t('task.title')}
+            >
+                <TopStatistic data={metricsData} />
+                <Row justify='end' style={{paddingTop: 16}}>
+                    <Col>
+                        <Input.Search
+                            placeholder={t('task.search_placeholder')}
+                            onSearch={search}
+                        />
+                    </Col>
+                </Row>
+            </PageHeader>
+
+            <div className='container'>
+                <Spin spinning={loading}>
+                    <TableHeader>
+                        <Button type='primary' onClick={handleBack}>
+                            {t('task.create')}
+                        </Button>
+                    </TableHeader>
+                    <Table
+                        columns={columns}
+                        rowKey={rowKey}
+                        dataSource={data}
+                        pagination={pagination}
+                        onChange={handleTable}
+                    />
+                </Spin>
+                <EditLayer
+                    visible={editLayer}
+                    data={detail}
+                    onCancel={handleHideEditLayer}
+                    refresh={handleRefresh}
+                />
+                <ViewLayer
+                    visible={viewLayer}
+                    task_id={detail.task_id}
+                    onCancel={handleHideViewLayer}
+                />
+            </div>
+        </>
+    );
+};
+
+export default Task;

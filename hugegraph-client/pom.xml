@@ -61,12 +61,10 @@
         <dependency>
             <groupId>org.apache.hugegraph</groupId>
             <artifactId>hg-pd-client</artifactId>
-            <version>1.5.0</version>
         </dependency>
         <dependency>
             <groupId>org.apache.hugegraph</groupId>
             <artifactId>hg-pd-grpc</artifactId>
-            <version>1.5.0</version>
         </dependency>
     </dependencies>
 
@@ -78,10 +76,9 @@
                 <configuration>
                     <source>${compiler.source}</source>
                     <target>${compiler.target}</target>
-                    <compilerArguments>
-                        <Xmaxerrs>500</Xmaxerrs>
-                    </compilerArguments>
                     <compilerArgs>
+                        <arg>-Xmaxerrs</arg>
+                        <arg>500</arg>
                         <arg>-Xlint:unchecked</arg>
                     </compilerArgs>
                 </configuration>

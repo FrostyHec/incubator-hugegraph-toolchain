@@ -18,19 +18,16 @@
 
 package org.apache.hugegraph.service.load;
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.google.common.collect.ImmutableList;
+import lombok.extern.log4j.Log4j2;
 import org.apache.commons.io.FileUtils;
 import org.apache.hugegraph.common.Constant;
 import org.apache.hugegraph.config.HugeConfig;
+import org.apache.hugegraph.driver.HugeClient;
 import org.apache.hugegraph.entity.GraphConnection;
 import org.apache.hugegraph.entity.enums.LoadStatus;
 import org.apache.hugegraph.entity.load.EdgeMapping;
@@ -45,6 +42,7 @@ import org.apache.hugegraph.entity.schema.VertexLabelEntity;
 import org.apache.hugegraph.exception.ExternalException;
 import org.apache.hugegraph.exception.InternalException;
 import org.apache.hugegraph.handler.LoadTaskExecutor;
+import org.apache.hugegraph.loader.HugeGraphLoader;
 import org.apache.hugegraph.loader.executor.LoadContext;
 import org.apache.hugegraph.loader.executor.LoadOptions;
 import org.apache.hugegraph.loader.mapping.InputStruct;
@@ -52,8 +50,8 @@ import org.apache.hugegraph.loader.mapping.LoadMapping;
 import org.apache.hugegraph.loader.source.file.FileFormat;
 import org.apache.hugegraph.loader.source.file.FileSource;
 import org.apache.hugegraph.loader.util.MappingUtil;
+import org.apache.hugegraph.loader.util.Printer;
 import org.apache.hugegraph.mapper.load.LoadTaskMapper;
-import org.apache.hugegraph.service.SettingSSLService;
 import org.apache.hugegraph.service.schema.EdgeLabelService;
 import org.apache.hugegraph.service.schema.VertexLabelService;
 import org.apache.hugegraph.util.Ex;
@@ -64,13 +62,18 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.baomidou.mybatisplus.core.metadata.IPage;
-import com.baomidou.mybatisplus.core.toolkit.Wrappers;
-import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import com.google.common.collect.ImmutableList;
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.Charset;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
-import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.StringUtils;
 
 @Log4j2
 @Service
@@ -85,9 +88,8 @@ public class LoadTaskService {
     @Autowired
     private LoadTaskExecutor taskExecutor;
     @Autowired
-    private SettingSSLService sslService;
-    @Autowired
     private HugeConfig config;
+
 
     private Map<Integer, LoadTask> runningTaskContainer;
 
@@ -99,21 +101,38 @@ public class LoadTaskService {
         return this.mapper.selectById(id);
     }
 
+    public LoadTask get(String graphSpace, String graph, int jobId, int id) {
+        QueryWrapper<LoadTask> query = Wrappers.query();
+        query.eq("id", id)
+             .eq("graphspace", graphSpace)
+             .eq("graph", graph)
+             .eq("job_id", jobId);
+        return this.mapper.selectOne(query);
+    }
+
     public List<LoadTask> listAll() {
         return this.mapper.selectList(null);
     }
 
-    public IPage<LoadTask> list(int connId, int jobId, int pageNo, int pageSize) {
+    public IPage<LoadTask> list(String graphSpace, String graph, int jobId,
+                                int pageNo, int pageSize) {
         QueryWrapper<LoadTask> query = Wrappers.query();
-        query.eq("conn_id", connId);
+        query.eq("graphspace", graphSpace);
+        query.eq("graph", graph);
         query.eq("job_id", jobId);
         query.orderByDesc("create_time");
         Page<LoadTask> page = new Page<>(pageNo, pageSize);
         return this.mapper.selectPage(page, query);
     }
 
-    public List<LoadTask> list(int connId, List<Integer> taskIds) {
-        return this.mapper.selectBatchIds(taskIds);
+    public List<LoadTask> list(String graphSpace, String graph, int jobId,
+                               List<Integer> taskIds) {
+        QueryWrapper<LoadTask> query = Wrappers.query();
+        query.eq("graphspace", graphSpace)
+             .eq("graph", graph)
+             .eq("job_id", jobId)
+             .in("id", taskIds);
+        return this.mapper.selectList(query);
     }
 
     public int count() {
@@ -160,9 +179,9 @@ public class LoadTaskService {
         return this.mapper.selectList(query);
     }
 
-    public LoadTask start(GraphConnection connection, FileMapping fileMapping) {
-        this.sslService.configSSL(this.config, connection);
-        LoadTask task = this.buildLoadTask(connection, fileMapping);
+    public LoadTask start(GraphConnection connection, FileMapping fileMapping,
+                          HugeClient client) {
+        LoadTask task = this.buildLoadTask(connection, fileMapping, client);
         this.save(task);
         // Executed in other threads
         this.taskExecutor.execute(task, () -> this.update(task));
@@ -272,7 +291,8 @@ public class LoadTaskService {
                  errorFiles.length);
         File errorFile = errorFiles[0];
         try {
-            return FileUtils.readFileToString(errorFile);
+            return FileUtils.readFileToString(errorFile,
+                                              Charset.defaultCharset());
         } catch (IOException e) {
             throw new InternalException("Failed to read error file %s",
                                         e, errorFile);
@@ -305,13 +325,6 @@ public class LoadTaskService {
                     LoadContext context = task.context();
                     long readLines = context.newProgress().totalInputRead();
                     if (readLines == 0L) {
-                        /*
-                         * When the Context is just constructed, newProgress
-                         * is empty. Only after parsing is started will use
-                         * oldProgress and incrementally update newProgress,
-                         * if get totalInputRead value during this process,
-                         * it will return 0, so need read it from oldProgress
-                         */
                         readLines = context.oldProgress().totalInputRead();
                     }
                     task.setFileReadLines(readLines);
@@ -325,11 +338,12 @@ public class LoadTaskService {
     }
 
     private LoadTask buildLoadTask(GraphConnection connection,
-                                   FileMapping fileMapping) {
+                                   FileMapping fileMapping, HugeClient client) {
         try {
             LoadOptions options = this.buildLoadOptions(connection, fileMapping);
             // NOTE: For simplicity, one file corresponds to one import task
-            LoadMapping mapping = this.buildLoadMapping(connection, fileMapping);
+            LoadMapping mapping = this.buildLoadMapping(connection, fileMapping,
+                                                        client);
             this.bindMappingToOptions(options, mapping, fileMapping.getPath());
             return new LoadTask(options, connection, fileMapping);
         } catch (Exception e) {
@@ -353,18 +367,40 @@ public class LoadTaskService {
     private LoadOptions buildLoadOptions(GraphConnection connection,
                                          FileMapping fileMapping) {
         LoadOptions options = new LoadOptions();
-        // Fill with input and server params
+        // Connection params
         options.file = fileMapping.getPath();
-        // No need to specify a schema file
-        options.host = connection.getHost();
-        options.port = connection.getPort();
-        options.graph = connection.getGraph();
+        boolean directServer = StringUtils.isNotEmpty(connection.getHost()) ||
+                               connection.getPort() != null;
+        if (StringUtils.isNotEmpty(connection.getGraphSpace())) {
+            options.graphSpace = connection.getGraphSpace();
+        }
+        if (StringUtils.isNotEmpty(connection.getGraph())) {
+            options.graph = connection.getGraph();
+        }
+        if (!directServer && StringUtils.isNotEmpty(connection.getPdPeers())) {
+            options.pdPeers = connection.getPdPeers();
+        }
+        if (StringUtils.isNotEmpty(connection.getCluster())) {
+            options.cluster = connection.getCluster();
+        }
+        if (StringUtils.isNotEmpty(connection.getRouteType())) {
+            options.routeType = connection.getRouteType();
+        }
+        if (StringUtils.isNotEmpty(connection.getHost())) {
+            options.host = connection.getHost();
+        }
+        if (connection.getPort() != null) {
+            options.port = connection.getPort();
+        }
         options.username = connection.getUsername();
-        options.token = connection.getPassword();
-        options.protocol = connection.getProtocol();
-        options.trustStoreFile = connection.getTrustStoreFile();
-        options.trustStoreToken = connection.getTrustStorePassword();
-        // Fill with load parameters
+        if (StringUtils.isNotEmpty(connection.getPassword())) {
+            options.password = connection.getPassword();
+        } else {
+            options.token = connection.getToken();
+        }
+        options.protocol = StringUtils.isNotEmpty(connection.getProtocol()) ?
+                           connection.getProtocol() : "http";
+        // Load parameters
         LoadParameter parameter = fileMapping.getLoadParameter();
         options.checkVertex = parameter.isCheckVertex();
         options.timeout = parameter.getInsertTimeout();
@@ -373,7 +409,7 @@ public class LoadTaskService {
         options.maxInsertErrors = parameter.getMaxInsertErrors();
         options.retryTimes = parameter.getRetryTimes();
         options.retryInterval = parameter.getRetryInterval();
-        // Optimized for hubble
+        // Optimized for hubble (conservative defaults)
         options.batchInsertThreads = 4;
         options.singleInsertThreads = 4;
         options.batchSize = 100;
@@ -381,17 +417,24 @@ public class LoadTaskService {
     }
 
     private LoadMapping buildLoadMapping(GraphConnection connection,
-                                         FileMapping fileMapping) {
+                                         FileMapping fileMapping,
+                                         HugeClient client) {
         FileSource source = this.buildFileSource(fileMapping);
+        log.info("Building load mapping for file: {}, vertices: {}, edges: {}",
+                 fileMapping.getName(),
+                 fileMapping.getVertexMappings().size(),
+                 fileMapping.getEdgeMappings().size());
 
         List<org.apache.hugegraph.loader.mapping.VertexMapping> vMappings;
-        vMappings = this.buildVertexMappings(connection, fileMapping);
+        vMappings = this.buildVertexMappings(connection, fileMapping, client);
         List<org.apache.hugegraph.loader.mapping.EdgeMapping> eMappings;
-        eMappings = this.buildEdgeMappings(connection, fileMapping);
+        eMappings = this.buildEdgeMappings(connection, fileMapping, client);
 
         InputStruct inputStruct = new InputStruct(vMappings, eMappings);
         inputStruct.id("1");
         inputStruct.input(source);
+        log.info("Built InputStruct id={}, vertices={}, edges={}",
+                 inputStruct.id(), inputStruct.vertices().size(), inputStruct.edges().size());
         return new LoadMapping(ImmutableList.of(inputStruct));
     }
 
@@ -421,36 +464,40 @@ public class LoadTaskService {
     }
 
     private List<org.apache.hugegraph.loader.mapping.VertexMapping>
-    buildVertexMappings(GraphConnection connection,
-                        FileMapping fileMapping) {
-        int connId = connection.getId();
+            buildVertexMappings(GraphConnection connection,
+                                FileMapping fileMapping, HugeClient client) {
         List<org.apache.hugegraph.loader.mapping.VertexMapping> vMappings =
                 new ArrayList<>();
         for (VertexMapping mapping : fileMapping.getVertexMappings()) {
-            VertexLabelEntity vl = this.vlService.get(mapping.getLabel(), connId);
+            VertexLabelEntity vl = this.vlService.get(mapping.getLabel(),
+                                                      client);
             List<String> idFields = mapping.getIdFields();
             Map<String, String> fieldMappings = mapping.fieldMappingToMap();
+
             org.apache.hugegraph.loader.mapping.VertexMapping vMapping;
             if (vl.getIdStrategy().isCustomize()) {
                 Ex.check(idFields.size() == 1,
                          "When the ID strategy is CUSTOMIZED, you must " +
                          "select a column in the file as the id");
-                vMapping = new org.apache.hugegraph.loader.mapping.VertexMapping(idFields.get(0),
-                                                                                 true);
+                vMapping = new org.apache.hugegraph.loader.mapping.VertexMapping(
+                        idFields.get(0), true);
             } else {
-                assert vl.getIdStrategy().isPrimaryKey();
+                Ex.check(vl.getIdStrategy().isPrimaryKey(),
+                         "Unsupported vertex id strategy: %s",
+                         vl.getIdStrategy());
                 List<String> primaryKeys = vl.getPrimaryKeys();
+                if (idFields == null || idFields.isEmpty()) {
+                    idFields = this.inferPrimaryKeyFields(fieldMappings,
+                                                          primaryKeys);
+                }
                 Ex.check(idFields.size() >= 1 &&
                          idFields.size() == primaryKeys.size(),
                          "When the ID strategy is PRIMARY_KEY, you must " +
                          "select at least one column in the file as the " +
                          "primary keys");
-                /*
-                 * The id column can be unfold into multi sub-ids only
-                 * when primarykeys contains just one field
-                 */
                 boolean unfold = idFields.size() == 1;
-                vMapping = new org.apache.hugegraph.loader.mapping.VertexMapping(null, unfold);
+                vMapping = new org.apache.hugegraph.loader.mapping.VertexMapping(
+                        null, unfold);
                 for (int i = 0; i < primaryKeys.size(); i++) {
                     fieldMappings.put(idFields.get(i), primaryKeys.get(i));
                 }
@@ -461,7 +508,7 @@ public class LoadTaskService {
             vMapping.mappingFields(fieldMappings);
             // set value_mapping
             vMapping.mappingValues(mapping.valueMappingToMap());
-            // set selected
+            // set selected fields
             vMapping.selectedFields().addAll(idFields);
             vMapping.selectedFields().addAll(fieldMappings.keySet());
             // set null_values
@@ -469,37 +516,45 @@ public class LoadTaskService {
             nullValues.addAll(mapping.getNullValues().getChecked());
             nullValues.addAll(mapping.getNullValues().getCustomized());
             vMapping.nullValues(nullValues);
-            // TODO: Update strategies
+
             vMappings.add(vMapping);
         }
         return vMappings;
     }
 
+    private List<String> inferPrimaryKeyFields(Map<String, String> fieldMappings,
+                                               List<String> primaryKeys) {
+        List<String> idFields = new ArrayList<>();
+        for (String primaryKey : primaryKeys) {
+            for (Map.Entry<String, String> entry : fieldMappings.entrySet()) {
+                if (primaryKey.equals(entry.getValue())) {
+                    idFields.add(entry.getKey());
+                    break;
+                }
+            }
+        }
+        return idFields;
+    }
+
     private List<org.apache.hugegraph.loader.mapping.EdgeMapping>
-    buildEdgeMappings(GraphConnection connection,
-                      FileMapping fileMapping) {
-        int connId = connection.getId();
+            buildEdgeMappings(GraphConnection connection,
+                              FileMapping fileMapping, HugeClient client) {
         List<org.apache.hugegraph.loader.mapping.EdgeMapping> eMappings =
                 new ArrayList<>();
         for (EdgeMapping mapping : fileMapping.getEdgeMappings()) {
             List<String> sourceFields = mapping.getSourceFields();
             List<String> targetFields = mapping.getTargetFields();
-            EdgeLabelEntity el = this.elService.get(mapping.getLabel(), connId);
-            VertexLabelEntity svl = this.vlService.get(el.getSourceLabel(),
-                                                       connId);
-            VertexLabelEntity tvl = this.vlService.get(el.getTargetLabel(),
-                                                       connId);
+            EdgeLabelEntity el = this.elService.get(mapping.getLabel(), client);
+            VertexLabelEntity svl = this.vlService.get(el.getSourceLabel(), client);
+            VertexLabelEntity tvl = this.vlService.get(el.getTargetLabel(), client);
             Map<String, String> fieldMappings = mapping.fieldMappingToMap();
-            /*
-             * When id strategy is customize or primaryKeys contains
-             * just one field, the param 'unfold' can be true
-             */
+
             boolean unfoldSource = true;
             if (svl.getIdStrategy().isPrimaryKey()) {
                 List<String> primaryKeys = svl.getPrimaryKeys();
                 Ex.check(sourceFields.size() >= 1 &&
                          sourceFields.size() == primaryKeys.size(),
-                         "When the source vertex ID strategy is CUSTOMIZED, " +
+                         "When the source vertex ID strategy is PRIMARY_KEY, " +
                          "you must select at least one column in the file " +
                          "as the id");
                 for (int i = 0; i < primaryKeys.size(); i++) {
@@ -514,7 +569,7 @@ public class LoadTaskService {
                 List<String> primaryKeys = tvl.getPrimaryKeys();
                 Ex.check(targetFields.size() >= 1 &&
                          targetFields.size() == primaryKeys.size(),
-                         "When the target vertex ID strategy is CUSTOMIZED, " +
+                         "When the target vertex ID strategy is PRIMARY_KEY, " +
                          "you must select at least one column in the file " +
                          "as the id");
                 for (int i = 0; i < primaryKeys.size(); i++) {
@@ -525,16 +580,16 @@ public class LoadTaskService {
                 }
             }
 
-            org.apache.hugegraph.loader.mapping.EdgeMapping eMapping;
-            eMapping = new org.apache.hugegraph.loader.mapping.EdgeMapping(
-                    sourceFields, unfoldSource, targetFields, unfoldTarget);
+            org.apache.hugegraph.loader.mapping.EdgeMapping eMapping =
+                    new org.apache.hugegraph.loader.mapping.EdgeMapping(
+                            sourceFields, unfoldSource, targetFields, unfoldTarget);
             // set label
             eMapping.label(mapping.getLabel());
             // set field_mapping
             eMapping.mappingFields(fieldMappings);
             // set value_mapping
             eMapping.mappingValues(mapping.valueMappingToMap());
-            // set selected
+            // set selected fields
             eMapping.selectedFields().addAll(sourceFields);
             eMapping.selectedFields().addAll(targetFields);
             eMapping.selectedFields().addAll(fieldMappings.keySet());
@@ -547,5 +602,35 @@ public class LoadTaskService {
             eMappings.add(eMapping);
         }
         return eMappings;
+    }
+
+    public void startCovid19(GraphConnection connection,
+                                 String graphSpace, String graph,
+                                 HugeClient client) {
+        FileMapping fileMapping =
+                new FileMapping(graphSpace, graph, "covid19",
+                                "example/covid19/struct.json");
+        LoadParameter loadParameter = new LoadParameter();
+        fileMapping.setLoadParameter(loadParameter);
+
+        LoadOptions options = this.buildLoadOptions(connection, fileMapping);
+        // options.direct = true;
+        // options.pdPeers = connection.getPdPeers();
+        options.schema = "example/covid19/schema.groovy";
+        options.host = connection.getHost();
+        options.port = connection.getPort();
+        options.protocol = connection.getProtocol();
+        loader(options);
+    }
+
+    public void loader(LoadOptions options) {
+        HugeGraphLoader loader;
+        try {
+            loader = new HugeGraphLoader(options);
+            loader.load();
+        } catch (Throwable e) {
+            Printer.printError("Failed to start loading", e);
+            return;
+        }
     }
 }

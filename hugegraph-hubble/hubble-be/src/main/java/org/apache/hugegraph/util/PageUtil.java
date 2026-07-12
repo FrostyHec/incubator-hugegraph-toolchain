@@ -27,7 +27,28 @@ import com.google.common.collect.Lists;
 
 public final class PageUtil {
 
+    public static final int MAX_PAGE_SIZE = 500;
+
+    public static void checkPage(int pageNo, int pageSize) {
+        boolean invalidSize = pageSize != -1 &&
+                              (pageSize < 1 || pageSize > MAX_PAGE_SIZE);
+        if (pageNo < 1 || invalidSize) {
+            throw new IllegalArgumentException(
+                      "page_no must be >= 1 and page_size must be -1 or between 1 " +
+                      "and " + MAX_PAGE_SIZE);
+        }
+    }
+
+    public static void checkPositivePage(int pageNo, int pageSize) {
+        if (pageNo < 1 || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
+            throw new IllegalArgumentException(
+                      "page_no must be >= 1 and page_size must be between 1 and " +
+                      MAX_PAGE_SIZE);
+        }
+    }
+
     public static <T> IPage<T> page(List<T> entities, int pageNo, int pageSize) {
+        checkPage(pageNo, pageSize);
         // Regard page no < 1 as 1
         int current = pageNo > 1 ? pageNo : 1;
         int pages;
@@ -43,13 +64,32 @@ public final class PageUtil {
         } else {
             pages = 0;
             // Return all entities when page size is negative
-            records = pageSize < 0 ? entities : Collections.emptyList();
+            if (pageSize < 0) {
+                records = entities;
+                pageSize = entities.size();
+            } else {
+                records = Collections.emptyList();
+            }
         }
 
         Page<T> page = new Page<>(current, pageSize, entities.size(), true);
         page.setRecords(records);
         page.setOrders(Collections.emptyList());
         page.setPages(pages);
+        return page;
+    }
+
+    public static <T> IPage<T> newPage(List<T> records, int pageNo,
+                                       int pageSize, int total) {
+        checkPositivePage(pageNo, pageSize);
+        int current = pageNo;
+        int pages = total == 0 ? 0 : (total + pageSize - 1) / pageSize;
+
+        Page<T> page = new Page<>(current, pageSize, total, true);
+        page.setRecords(records);
+        page.setOrders(Collections.emptyList());
+        page.setPages(pages);
+
         return page;
     }
 }

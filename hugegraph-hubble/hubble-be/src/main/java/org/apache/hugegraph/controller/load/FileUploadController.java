@@ -23,32 +23,20 @@ import static org.apache.hugegraph.service.load.FileMappingService.JOB_PREIFX;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import org.apache.hugegraph.controller.BaseController;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.lang.StringUtils;
-import org.apache.hugegraph.common.Constant;
-import org.apache.hugegraph.config.HugeConfig;
-import org.apache.hugegraph.entity.enums.FileMappingStatus;
-import org.apache.hugegraph.entity.enums.JobStatus;
-import org.apache.hugegraph.entity.load.FileMapping;
-import org.apache.hugegraph.entity.load.FileUploadResult;
-import org.apache.hugegraph.entity.load.JobManager;
-import org.apache.hugegraph.exception.InternalException;
-import org.apache.hugegraph.options.HubbleOptions;
-import org.apache.hugegraph.service.load.FileMappingService;
-import org.apache.hugegraph.service.load.JobManagerService;
-import org.apache.hugegraph.util.CollectionUtil;
-import org.apache.hugegraph.util.Ex;
-import org.apache.hugegraph.util.FileUtil;
-import org.apache.hugegraph.util.HubbleUtil;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -60,12 +48,30 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import org.apache.hugegraph.common.Constant;
+import org.apache.hugegraph.config.HugeConfig;
+import org.apache.hugegraph.entity.enums.FileMappingStatus;
+import org.apache.hugegraph.entity.enums.JobStatus;
+import org.apache.hugegraph.entity.load.FileMapping;
+import org.apache.hugegraph.entity.load.FileUploadResult;
+import org.apache.hugegraph.entity.load.JobManager;
+import org.apache.hugegraph.exception.ExternalException;
+import org.apache.hugegraph.exception.InternalException;
+import org.apache.hugegraph.options.HubbleOptions;
+import org.apache.hugegraph.service.load.FileMappingService;
+import org.apache.hugegraph.service.load.JobManagerService;
+import org.apache.hugegraph.util.CollectionUtil;
+import org.apache.hugegraph.util.Ex;
+import org.apache.hugegraph.util.FileUtil;
+import org.apache.hugegraph.util.HubbleUtil;
+
 import lombok.extern.log4j.Log4j2;
 
 @Log4j2
 @RestController
-@RequestMapping(Constant.API_VERSION + "graph-connections/{connId}/job-manager/{jobId}/upload-file")
-public class FileUploadController {
+@RequestMapping(Constant.API_VERSION + "graphspaces/{graphspace}/graphs" +
+        "/{graph}/job-manager/{jobId}/upload-file")
+public class FileUploadController extends BaseController {
 
     @Autowired
     private HugeConfig config;
@@ -75,10 +81,14 @@ public class FileUploadController {
     private JobManagerService jobService;
 
     @GetMapping("token")
-    public Map<String, String> fileToken(@PathVariable("connId") int connId,
+    public Map<String, String> fileToken(
+                                         @PathVariable("graphspace") String graphSpace,
+                                         @PathVariable("graph") String graph,
                                          @PathVariable("jobId") int jobId,
                                          @RequestParam("names")
                                          List<String> fileNames) {
+        Ex.check(this.jobService.get(graphSpace, graph, jobId) != null,
+                 "job-manager.not-exist.id", jobId);
         Ex.check(CollectionUtil.allUnique(fileNames),
                  "load.upload.file.duplicate-name");
         Map<String, String> tokens = new HashMap<>();
@@ -94,7 +104,8 @@ public class FileUploadController {
     }
 
     @PostMapping
-    public FileUploadResult upload(@PathVariable("connId") int connId,
+    public FileUploadResult upload(@PathVariable("graphspace") String graphSpace,
+                                   @PathVariable("graph") String graph,
                                    @PathVariable("jobId") int jobId,
                                    @RequestParam("file") MultipartFile file,
                                    @RequestParam("name") String fileName,
@@ -107,16 +118,17 @@ public class FileUploadController {
         this.checkTotalAndIndexValid(total, index);
         this.checkFileNameValid(fileName);
         this.checkFileNameMatchToken(fileName, token);
-        JobManager jobEntity = this.jobService.get(jobId);
+        JobManager jobEntity = this.jobService.get(graphSpace, graph, jobId);
         Long sourceFileSize = this.resolveSourceFileSize(file, fileSize,
                                                          total, index);
-        this.checkFileValid(jobId, jobEntity, file, fileName);
+        this.checkFileValid(graphSpace, graph, jobId, jobEntity, file, fileName);
         if (jobEntity.getJobStatus() == JobStatus.DEFAULT) {
             jobEntity.setJobStatus(JobStatus.UPLOADING);
             this.jobService.update(jobEntity);
         }
         // Ensure location exist and generate file path
-        String filePath = this.generateFilePath(connId, jobId, fileName);
+        String filePath = this.generateFilePath(graphSpace, graph, jobId,
+                                                fileName);
         // Check this file deleted before
         ReadWriteLock lock = this.uploadingTokenLocks().get(token);
         FileUploadResult result;
@@ -133,16 +145,18 @@ public class FileUploadController {
         try {
             FileMapping reservedMapping;
             synchronized (this.service) {
-                reservedMapping = this.reserveUploadQuota(connId, jobId,
+                reservedMapping = this.reserveUploadQuota(graphSpace, graph, jobId,
                                                           fileName, filePath,
                                                           sourceFileSize);
             }
-            result = this.service.uploadFile(file, index, filePath);
+            result = this.service.uploadFile(file, fileName, index, filePath);
             if (result.getStatus() == FileUploadResult.Status.FAILURE) {
                 return result;
             }
             synchronized (this.service) {
-                FileMapping mapping = this.service.get(connId, jobId, fileName);
+                // Verify the existence of fragmented files
+                FileMapping mapping = this.service.get(graphSpace, graph, jobId,
+                                                       fileName);
                 if (mapping == null) {
                     mapping = reservedMapping;
                 }
@@ -160,7 +174,8 @@ public class FileUploadController {
                     this.service.update(mapping);
                     return result;
                 }
-                JobManager currentJob = this.jobService.get(jobId);
+                JobManager currentJob = this.jobService.get(graphSpace, graph,
+                                                             jobId);
                 long actualFileSize;
                 try {
                     actualFileSize = this.resolveUploadedFileSize(
@@ -203,18 +218,20 @@ public class FileUploadController {
     }
 
     @DeleteMapping
-    public Boolean delete(@PathVariable("connId") int connId,
+    public Boolean delete(@PathVariable("graphspace") String graphSpace,
+                          @PathVariable("graph") String graph,
                           @PathVariable("jobId") int jobId,
                           @RequestParam("name") String fileName,
                           @RequestParam("token") String token) {
         this.checkFileNameValid(fileName);
-        JobManager jobEntity = this.jobService.get(jobId);
+        JobManager jobEntity = this.jobService.get(graphSpace, graph, jobId);
         Ex.check(jobEntity != null, "job-manager.not-exist.id", jobId);
         Ex.check(jobEntity.getJobStatus() == JobStatus.UPLOADING ||
                  jobEntity.getJobStatus() == JobStatus.MAPPING ||
                  jobEntity.getJobStatus() == JobStatus.SETTING,
                  "deleted.file.no-permission");
-        FileMapping mapping = this.service.get(connId, jobId, fileName);
+        FileMapping mapping = this.service.get(graphSpace, graph, jobId,
+                                               fileName);
         Ex.check(mapping != null, "load.file-mapping.not-exist.name", fileName);
 
         ReadWriteLock lock = this.uploadingTokenLocks().get(token);
@@ -240,8 +257,10 @@ public class FileUploadController {
     }
 
     @PutMapping("next-step")
-    public JobManager nextStep(@PathVariable("jobId") int jobId) {
-        JobManager jobEntity = this.jobService.get(jobId);
+    public JobManager nextStep(@PathVariable("graphspace") String graphSpace,
+                               @PathVariable("graph") String graph,
+                               @PathVariable("jobId") int jobId) {
+        JobManager jobEntity = this.jobService.get(graphSpace, graph, jobId);
         Ex.check(jobEntity != null, "job-manager.not-exist.id", jobId);
         Ex.check(jobEntity.getJobStatus() == JobStatus.UPLOADING,
                  "job.manager.status.unexpected",
@@ -262,6 +281,10 @@ public class FileUploadController {
         if (index < 0) {
             throw new InternalException("The request params 'index' must >= 0");
         }
+        if (index >= total) {
+            throw new InternalException("The request params 'index' must < " +
+                                        "'total'");
+        }
     }
 
     private void checkFileNameMatchToken(String fileName, String token) {
@@ -279,8 +302,9 @@ public class FileUploadController {
                  "load.upload.file.name.invalid");
     }
 
-    private void checkFileValid(int jobId, JobManager jobEntity,
-                                MultipartFile file, String fileName) {
+    private void checkFileValid(String graphSpace, String graph, int jobId,
+                                JobManager jobEntity, MultipartFile file,
+                                String fileName) {
         Ex.check(jobEntity != null, "job-manager.not-exist.id", jobId);
         Ex.check(jobEntity.getJobStatus() == JobStatus.DEFAULT ||
                  jobEntity.getJobStatus() == JobStatus.UPLOADING ||
@@ -293,19 +317,29 @@ public class FileUploadController {
         log.debug("File content type: {}", file.getContentType());
 
         String format = FilenameUtils.getExtension(fileName);
-        List<String> formatWhiteList = this.config.get(
-                HubbleOptions.UPLOAD_FILE_FORMAT_LIST);
-        Ex.check(formatWhiteList.contains(format),
+        Ex.check(StringUtils.isNotBlank(format),
                  "load.upload.file.format.unsupported");
+        List<String> formatWhiteList = this.config.get(
+                                       HubbleOptions.UPLOAD_FILE_FORMAT_LIST);
+        String normalizedFormat = format.toLowerCase(Locale.ROOT);
+        boolean supported = formatWhiteList != null &&
+                            formatWhiteList.stream()
+                                           .filter(StringUtils::isNotBlank)
+                                           .map(String::trim)
+                                           .map(item -> item.toLowerCase(Locale.ROOT))
+                                           .anyMatch(normalizedFormat::equals);
+        Ex.check(supported, "load.upload.file.format.unsupported");
     }
 
-    private FileMapping reserveUploadQuota(int connId, int jobId,
+    private FileMapping reserveUploadQuota(String graphSpace, String graph,
+                                           int jobId,
                                            String fileName, String filePath,
                                            Long sourceFileSize) {
-        JobManager currentJob = this.jobService.get(jobId);
+        JobManager currentJob = this.jobService.get(graphSpace, graph, jobId);
         Ex.check(currentJob != null, "job-manager.not-exist.id", jobId);
 
-        FileMapping mapping = this.service.get(connId, jobId, fileName);
+        FileMapping mapping = this.service.get(graphSpace, graph, jobId,
+                                               fileName);
         Ex.check(mapping == null ||
                  mapping.getFileStatus() == FileMappingStatus.UPLOADING,
                  "load.upload.file.existed", fileName);
@@ -319,7 +353,7 @@ public class FileUploadController {
                                 reservedUploadingSize);
 
         if (mapping == null) {
-            mapping = new FileMapping(connId, fileName, filePath);
+            mapping = new FileMapping(graphSpace, graph, fileName, filePath);
             mapping.setJobId(jobId);
             this.fillUploadingReservation(mapping, reservedFileSize);
             this.service.save(mapping);
@@ -356,13 +390,13 @@ public class FileUploadController {
         Ex.check(fileSize > 0L, "load.upload.file.cannot-be-empty");
 
         long singleFileSizeLimit = this.config.get(
-                HubbleOptions.UPLOAD_SINGLE_FILE_SIZE_LIMIT);
+                                   HubbleOptions.UPLOAD_SINGLE_FILE_SIZE_LIMIT);
         Ex.check(fileSize <= singleFileSizeLimit,
                  "load.upload.file.exceed-single-size",
                  FileUtils.byteCountToDisplaySize(singleFileSizeLimit));
 
         long totalFileSizeLimit = this.config.get(
-                HubbleOptions.UPLOAD_TOTAL_FILE_SIZE_LIMIT);
+                                  HubbleOptions.UPLOAD_TOTAL_FILE_SIZE_LIMIT);
         long totalReservedSize = this.safeAdd(this.safeAdd(fileSize,
                                                            currentJobSize),
                                               reservedUploadingSize);
@@ -445,14 +479,20 @@ public class FileUploadController {
         }
     }
 
-    private String generateFilePath(int connId, int jobId, String fileName) {
+    private String generateFilePath(String graphSpace, String graph, int jobId,
+                                    String fileName) {
         String location = this.config.get(HubbleOptions.UPLOAD_FILE_LOCATION);
-        String path = Paths.get(CONN_PREIFX + connId, JOB_PREIFX + jobId)
-                           .toString();
+        String path = Paths.get(CONN_PREIFX + graphSpace + "-" + graph,
+                                JOB_PREIFX + jobId).toString();
         this.ensureLocationExist(location, path);
         // Before merge: upload-files/conn-1/verson_person.csv/part-1
         // After merge: upload-files/conn-1/file-mapping-1/verson_person.csv
-        return Paths.get(location, path, fileName).toString();
+        Path root = Paths.get(location, path).normalize();
+        Path filePathObj = root.resolve(fileName).normalize();
+        if (!filePathObj.startsWith(root)) {
+            throw new ExternalException("load.upload.file.name.invalid");
+        }
+        return filePathObj.toString();
     }
 
     private void ensureLocationExist(String location, String connPath) {

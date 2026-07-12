@@ -25,9 +25,12 @@ import org.junit.runners.Suite;
         VertexSerializerTest.class,
         PathSerializerTest.class,
         RestResultTest.class,
+        RestClientStatusTest.class,
         BatchElementRequestTest.class,
         PropertyKeyTest.class,
         IndexLabelTest.class,
+        GraphSpaceAPITest.class,
+        GraphsAPITest.class,
         CommonUtilTest.class,
         IdUtilTest.class,
         SplicingIdGeneratorTest.class

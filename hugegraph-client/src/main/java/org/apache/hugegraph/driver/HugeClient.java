@@ -32,9 +32,8 @@ import org.slf4j.LoggerFactory;
 import com.google.common.base.Strings;
 
 /**
- * The HugeClient class is the main entry point for interacting with a HugeGraph server.
- * It provides methods for managing graphs, schemas, jobs, tasks, and other resources.
- * It also implements the Closeable interface, so it can be used in a try-with-resources statement.
+ * Main entry point for HugeGraph server operations.
+ * Use {@link #builder(String, String, String)} to create an instance.
  */
 public class HugeClient implements Closeable {
 
@@ -72,11 +71,6 @@ public class HugeClient implements Closeable {
     private WhiteIpListManager whiteIpListManager;
     private VermeerManager vermeerManager;
 
-    /**
-     * Constructs a new HugeClient using the provided builder.
-     *
-     * @param builder the HugeClientBuilder to use for configuration
-     */
     public HugeClient(HugeClientBuilder builder) {
         this.borrowedClient = false;
         this.graphSpaceName = builder.graphSpace();
@@ -111,11 +105,13 @@ public class HugeClient implements Closeable {
         }
     }
 
-    // QUESTION: add gs to method param?
     public HugeClient(HugeClient client, String graphSpace, String graph) {
         this.borrowedClient = true;
         this.client = client.client;
-        this.initManagers(this.client, graphSpace, graph);
+        this.graphSpaceName = (graphSpace == null || graphSpace.isEmpty()) ? 
+                              HugeClientBuilder.DEFAULT_GRAPHSPACE : graphSpace;
+        this.graphName = graph;
+        this.initManagers(this.client, this.graphSpaceName, this.graphName);
     }
 
     public static HugeClientBuilder builder(String url, String graphSpace, String graph) {
@@ -126,8 +122,14 @@ public class HugeClient implements Closeable {
         return new HugeClientBuilder(url, HugeClientBuilder.DEFAULT_GRAPHSPACE, graph);
     }
 
+    public static HugeClientBuilder builder(String url, String graphSpace, String graph,
+                                            boolean skipRequiredChecks) {
+        return new HugeClientBuilder(url, graphSpace, graph).graphRequired(!skipRequiredChecks);
+    }
+
     public HugeClient assignGraph(String graphSpace, String graph) {
-        this.graphSpaceName = graphSpace;
+        this.graphSpaceName = (graphSpace == null || graphSpace.isEmpty()) ? 
+                              HugeClientBuilder.DEFAULT_GRAPHSPACE : graphSpace;
         this.graphName = graph;
         this.initManagers(this.client, this.graphSpaceName, this.graphName);
         return this;

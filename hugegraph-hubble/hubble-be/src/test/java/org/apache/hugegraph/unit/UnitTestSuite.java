@@ -18,14 +18,45 @@
 
 package org.apache.hugegraph.unit;
 
+import org.apache.hugegraph.controller.ingest.IngestControllerTest;
+import org.apache.hugegraph.controller.langchain.LangChainControllerSecurityTest;
+import org.apache.hugegraph.controller.schema.SchemaControllerSecurityTest;
 import org.junit.runner.RunWith;
 import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses({
-        EntityUtilTest.class,
-        FileUtilTest.class
+    AuthSecurityTest.class,
+    AppTypeTest.class,
+    AuthzRouteRegistrationTest.class,
+    BusinessAssertTest.class,
+    BaseControllerGremlinClientTest.class,
+    ConsolePrintTest.class,
+    EmptyCatchTest.class,
+    FileMappingSchemaTest.class,
+    FileUploadControllerTest.class,
+    FileUtilTest.class,
+    GraphServiceImportTest.class,
+    GraphMetricsControllerTest.class,
+    GraphsControllerCanonicalTest.class,
+    GremlinHistoryFailureTest.class,
+    HubbleOptionsTest.class,
+    IngestControllerTest.class,
+    LangChainControllerSecurityTest.class,
+    LegacyFacadeRemovalTest.class,
+    MessageSourceHandlerTest.class,
+    SchemaControllerSecurityTest.class,
+    GroovySchemaCompatibilityTest.class,
+    JobManagerServiceTest.class,
+    K8sTokenEndpointSecurityTest.class,
+    LoadTaskServiceTest.class,
+    LoaderScopeControllerTest.class,
+    LoginAttemptGuardTest.class,
+    OltpAlgoControllerTest.class,
+    OltpAlgoServiceTest.class,
+    PriorityFixTest.class,
+    QueryServiceTest.class,
+    UrlUtilTest.class
 })
 public class UnitTestSuite {
-
 }

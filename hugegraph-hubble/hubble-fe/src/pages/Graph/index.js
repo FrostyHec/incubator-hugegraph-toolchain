@@ -1,0 +1,567 @@
+/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with this
+ * work for additional information regarding copyright ownership. The ASF
+ * licenses this file to You under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ */
+
+import {
+    Table,
+    Space,
+    Row,
+    Col,
+    PageHeader,
+    Button,
+    Input,
+    Radio,
+    DatePicker,
+    Card,
+    Modal,
+    message,
+    Pagination,
+    Spin,
+    Alert,
+    Tooltip,
+} from 'antd';
+import {useState, useEffect, useCallback} from 'react';
+import {useTranslation} from 'react-i18next';
+import {EditLayer, ViewLayer} from './EditLayer';
+import {PlusOutlined} from '@ant-design/icons';
+import {Link, useParams, useNavigate} from 'react-router-dom';
+import style from './index.module.scss';
+import * as api from '../../api';
+import {isPdEnabled} from '../../utils/config';
+import {
+    DEFAULT_GRAPHSPACE,
+    isGraphCreateEnabled,
+    isGraphDefaultMutationEnabled,
+} from '../../utils/productMode';
+import moment from 'moment';
+import GraphCard from './Card';
+import ClearGraphConfirmModal from './ClearGraphConfirmModal';
+import KeyboardAction from '../../components/KeyboardAction';
+
+const GraphRowAction = ({onAction, graph, children}) => {
+    const handleClick = useCallback(() => onAction(graph), [graph, onAction]);
+
+    return <Button type='link' onClick={handleClick}>{children}</Button>;
+};
+
+const Graph = () => {
+    const {t} = useTranslation();
+    const [data, setData] = useState([]);
+    const [dateData, setDateData] = useState('');
+    const [graphname, setGraphname] = useState('');
+    const [graphspaceInfo, setGraphspaceInfo] = useState({});
+    const [editLayer, setEditLayer] = useState(false);
+    const [viewLayer, setViewLayer] = useState(false);
+    const [selectGraph, setSelectGraph] = useState('');
+    const [listType, setListType] = useState('image');
+    const [refresh, setRefresh] = useState(false);
+    const [pagination, setPagination] = useState({current: 1, pageSize: 11});
+    const [loading, setLoading] = useState(false);
+    const [listUnavailable, setListUnavailable] = useState(false);
+    const [clearSelection, setClearSelection] = useState(null);
+    const {graphspace} = useParams();
+    const navigate = useNavigate();
+    const pdMode = isPdEnabled();
+    const graphCreateEnabled = isGraphCreateEnabled(pdMode);
+    const graphDefaultMutationEnabled = isGraphDefaultMutationEnabled(pdMode);
+
+    const handlePagination = useCallback(current => {
+        setPagination({...pagination, current});
+    }, [pagination]);
+
+    const handleTable = useCallback(pagination => {
+        setPagination(pagination);
+    }, []);
+
+    const handleListType = useCallback(e => {
+        setListType(e.target.value);
+        setPagination({...pagination, current: 1, pageSize: e.target.value === 'image' ? 11 : 10});
+    }, [pagination]);
+
+    const handleSearch = useCallback(val => {
+        setGraphname(val);
+        setRefresh(!refresh);
+    }, [refresh]);
+
+    const showEditLayer = useCallback(() => {
+        setEditLayer(true);
+        setSelectGraph('');
+    }, []);
+
+    const editGraph = useCallback(graph => {
+        setSelectGraph(graph);
+        setEditLayer(true);
+    }, []);
+
+    const clearData = useCallback(graph => {
+        setClearSelection({graph});
+    }, []);
+
+    const handleClearSuccess = useCallback(() => {
+        message.success(t('common.msg.success'));
+        setClearSelection(null);
+        setRefresh(value => !value);
+    }, [t]);
+
+    const handleClearCancel = useCallback(() => {
+        setClearSelection(null);
+    }, []);
+
+    const handleClearConfirm = useCallback(() => {
+        return api.manage.clearGraphData(graphspace, clearSelection.graph);
+    }, [clearSelection, graphspace]);
+
+    const showSchema = useCallback(graph => {
+        setViewLayer(true);
+        setSelectGraph(graph);
+    }, []);
+
+    const deleteGraph = useCallback(graph => {
+        Modal.confirm({
+            title: t('graph.delete_confirm.title'),
+            content: t('graph.delete_confirm.irreversible'),
+            onOk: () => {
+                const hide = message.loading(t('graph.delete_confirm.deleting'), 0);
+                api.manage.delGraph(graphspace, graph).then(res => {
+                    hide();
+                    if (res.status === 200) {
+                        message.success(t('graph.delete_confirm.success'));
+                        setRefresh(value => !value);
+                        return;
+                    }
+
+                    message.error(t('graph.delete_confirm.failed'));
+                });
+            },
+        });
+    }, [graphspace, t]);
+
+    const setDefault = useCallback(graph => {
+        const hide = message.loading(t('graph.set_default.setting'), 0);
+        return api.manage.setDefaultGraph(graphspace, graph, {
+            suppressBusinessErrorToast: true,
+        }).then(res => {
+            hide();
+            if (res.status === 200) {
+                message.success(t('graph.set_default.success'));
+                setRefresh(value => !value);
+                return;
+            }
+            message.error(t('common.msg.operation_failed'));
+        }).catch(() => {
+            hide();
+            message.error(t('common.msg.operation_failed'));
+        });
+    }, [graphspace, t]);
+
+    const handleSetDefault = useCallback(graph => {
+        api.manage.getDefaultGraph(graphspace, {
+            suppressBusinessErrorToast: true,
+        }).then(res => {
+            if (res.status !== 200) {
+                message.error(t('common.msg.operation_failed'));
+                return;
+            }
+
+            const value = res.data.default_graph;
+            const defaults = Array.isArray(value) ? value : [value].filter(Boolean);
+            if (defaults.some(defaultGraph => defaultGraph !== graph)) {
+                Modal.confirm({
+                    title: t('graph.set_default_confirm'),
+                    onOk: () => setDefault(graph),
+                });
+
+                return;
+            }
+
+            setDefault(graph);
+        }).catch(() => message.error(t('common.msg.operation_failed')));
+    }, [graphspace, setDefault, t]);
+
+    const handleBack = useCallback(() => {
+        if (isPdEnabled()) {
+            navigate('/graphspace');
+        }
+        else {
+            navigate('/navigation');
+        }
+    }, [navigate]);
+
+    const handleHideEditLayer = useCallback(() => {
+        setEditLayer(false);
+    }, []);
+
+    const handleRefresh = useCallback(() => {
+        setRefresh(!refresh);
+    }, [refresh]);
+
+    const handleHideViewLayer = useCallback(() => {
+        setViewLayer(false);
+    }, []);
+
+    const handleDatePickerChange = useCallback((_, val) => setDateData(val), []);
+
+    const handleGotoMeta = useCallback(item => {
+        navigate(`/graphspace/${item.graphspace || 'DEFAULT'}/graph/${item.name}/meta`);
+    }, [navigate]);
+
+    const handleGotoAnalysis = useCallback(item => {
+        navigate(`/gremlin/${item.graphspace || 'DEFAULT'}/${item.name}`);
+    }, [navigate]);
+
+    const columns = [
+        {
+            title: t('graph.col.name'),
+            render: row => (
+                <Link to={`/gremlin/${row.graphspace || 'DEFAULT'}/${row.name}`}>
+                    {row.nickname}
+                    {row.default && (
+                        <span className={style.default}>
+                            {t('common.label.default')}
+                        </span>
+                    )}
+                </Link>
+            ),
+        },
+        {
+            title: t('graph.detail.graphspace'),
+            dataIndex: 'graphspace_nickname',
+        },
+        {
+            title: t('graph.col.create_time'),
+            dataIndex: 'create_time',
+            align: 'center',
+            width: 140,
+            render: val => moment(val).format('YYYY-MM-DD'),
+        },
+        {
+            title: t('graph.detail.update_data'),
+            dataIndex: 'update_time',
+            align: 'center',
+            width: 140,
+            render: val => moment(val).format('YYYY-MM-DD'),
+        },
+        {
+            title: t('graph.col.creator'),
+            dataIndex: 'creator',
+            align: 'center',
+            width: 140,
+        },
+        {
+            title: t('graph.col.operation'),
+            width: 420,
+            align: 'center',
+            render: row => {
+                return (
+                    <Space>
+                        <Link to={`/graphspace/${graphspace}/graph/${row.name}/meta`}>
+                            {t('graph.menu.meta_config')}
+                        </Link>
+                        {(row.default)
+                            ? <span className={style.disable}>{t('graph.menu.clear_data')}</span>
+                            : (
+                                <GraphRowAction onAction={clearData} graph={row.name}>
+                                    {t('graph.menu.clear_data')}
+                                </GraphRowAction>
+                            )}
+                        {(row.graphspace === 'neizhianli')
+                            ? <span className={style.disable}>{t('common.action.delete')}</span>
+                            : (
+                                <GraphRowAction onAction={deleteGraph} graph={row.name}>
+                                    {t('common.action.delete')}
+                                </GraphRowAction>
+                            )}
+                        <GraphRowAction onAction={showSchema} graph={row.name}>
+                            {t('graph.menu.view_schema')}
+                        </GraphRowAction>
+                        {(row.graphspace === 'neizhianli')
+                            ? <span className={style.disable}>{t('common.action.edit')}</span>
+                            : (
+                                <GraphRowAction onAction={editGraph} graph={row.name}>
+                                    {t('common.action.edit')}
+                                </GraphRowAction>
+                            )}
+                        {graphDefaultMutationEnabled && (
+                            row.default
+                                ? <span className={style.disable}>{t('graph.menu.set_default')}</span>
+                                : (
+                                    <GraphRowAction onAction={handleSetDefault} graph={row.name}>
+                                        {t('graph.menu.set_default')}
+                                    </GraphRowAction>
+                                )
+                        )}
+                        {graphCreateEnabled && (
+                            <Tooltip title={t('graph.clone.unavailable')}>
+                                <span
+                                    className={style.disable}
+                                    role='button'
+                                    aria-disabled='true'
+                                    aria-label={`${t('graph.menu.clone')}: ${t('graph.clone.unavailable')}`}
+                                    tabIndex={0}
+                                >
+                                    {t('graph.menu.clone')}
+                                </span>
+                            </Tooltip>
+                        )}
+                    </Space>
+                );
+            },
+        },
+    ];
+
+    const getMenus = item => [
+        {
+            key: '0',
+            label: t('graph.menu.enter_analysis'),
+            onClick: () => handleGotoAnalysis(item),
+        },
+        {
+            key: '1',
+            label: t('graph.menu.meta_config'),
+            onClick: () => handleGotoMeta(item),
+        },
+        {
+            key: '2',
+            disabled: item.default,
+            label: item.default
+                ? <span className={style.disable}>{t('graph.menu.clear_data')}</span>
+                : t('graph.menu.clear_data'),
+            onClick: item.default ? undefined : () => clearData(item.name),
+        },
+        graphDefaultMutationEnabled && {
+            key: '4',
+            disabled: item.default,
+            label: item.default
+                ? <span className={style.disable}>{t('graph.menu.set_default')}</span>
+                : t('graph.menu.set_default'),
+            onClick: item.default ? undefined : () => handleSetDefault(item.name),
+        },
+        {
+            key: '5',
+            label: t('graph.menu.view_schema'),
+            onClick: () => showSchema(item.name),
+        },
+        {
+            key: '6',
+            disabled: item.graphspace === 'neizhianli',
+            label: item.graphspace === 'neizhianli'
+                ? <span className={style.disable}>{t('common.action.edit')}</span>
+                : t('common.action.edit'),
+            onClick: item.graphspace === 'neizhianli'
+                ? undefined : () => editGraph(item.name),
+        },
+        {
+            key: '7',
+            disabled: item.graphspace === 'neizhianli',
+            label: item.graphspace === 'neizhianli'
+                ? <span className={style.disable}>{t('common.action.delete')}</span>
+                : t('common.action.delete'),
+            onClick: item.graphspace === 'neizhianli'
+                ? undefined : () => deleteGraph(item.name),
+        },
+        graphCreateEnabled && {
+            key: '8',
+            disabled: true,
+            label: (
+                <Tooltip title={t('graph.clone.unavailable')}>
+                    <span
+                        aria-label={`${t('graph.menu.clone')}: ${t('graph.clone.unavailable')}`}
+                    >
+                        {t('graph.menu.clone')}
+                    </span>
+                </Tooltip>
+            ),
+        },
+    ].filter(Boolean);
+
+    useEffect(() => {
+        if (!pdMode && graphspace === DEFAULT_GRAPHSPACE) {
+            setGraphspaceInfo({name: DEFAULT_GRAPHSPACE, nickname: DEFAULT_GRAPHSPACE});
+            return;
+        }
+
+        api.manage.getGraphSpace(graphspace).then(res => {
+            if (res.status === 200) {
+                setGraphspaceInfo(res.data);
+                return;
+            }
+
+            message.error(res.message);
+        });
+    }, [graphspace, pdMode]);
+
+    useEffect(() => {
+        setLoading(true);
+        setListUnavailable(false);
+
+        api.manage.getGraphList(graphspace, {
+            create_time: dateData,
+            query: graphname,
+            page_no: pagination.current,
+            page_size: pagination.pageSize,
+        }, {suppressBusinessErrorToast: true}).then(res => {
+            if (res.status === 200) {
+                setData(res.data.records);
+                setPagination({...pagination, total: res.data.total});
+
+                return;
+            }
+            setListUnavailable(true);
+        }).catch(() => {
+            setListUnavailable(true);
+        }).finally(() => {
+            setLoading(false);
+        });
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [refresh, pagination.current, listType, dateData, graphspace, graphname]);
+
+    return (
+        <Spin spinning={loading}>
+            <PageHeader
+                ghost={false}
+                onBack={handleBack}
+                title={pdMode
+                    ? (graphspaceInfo.nickname ?? graphspace) + ` - ${t('graph.title')}`
+                    : t('graph.title')}
+            >
+                <Row justify='space-between'>
+                    <Col>
+                        <DatePicker onChange={handleDatePickerChange} />
+                    </Col>
+                    <Col>
+                        <Space>
+                            <Radio.Group
+                                options={[
+                                    {label: t('common.label.view_mode'), value: 'image'},
+                                    {label: t('common.label.list_mode'), value: 'list'},
+                                ]}
+                                optionType='button'
+                                buttonStyle='solid'
+                                defaultValue={'image'}
+                                onChange={handleListType}
+                            />
+                            <Input.Search
+                                onSearch={handleSearch}
+                                placeholder={t('graph.search_placeholder')}
+                            />
+                        </Space>
+                    </Col>
+                </Row>
+            </PageHeader>
+
+            <div className='container'>
+                {listUnavailable && (
+                    <Alert
+                        showIcon
+                        type='error'
+                        message={t('graph.unavailable')}
+                    />
+                )}
+                {listType === 'image'
+                    ? (
+                        <>
+                            <Row gutter={[10, 10]} justify='start'>
+                                {graphCreateEnabled && (
+                                    <Col span={8} key='add'>
+                                        <KeyboardAction
+                                            onAction={showEditLayer}
+                                            aria-label={t('graph.create')}
+                                        >
+                                            <Card className={style.add_card}>
+                                                <Space><PlusOutlined />{t('graph.create')}</Space>
+                                            </Card>
+                                        </KeyboardAction>
+                                    </Col>
+                                )}
+
+                                {data.map(item => {
+                                    const menus = getMenus(item);
+
+                                    return (
+                                        <Col span={8} key={item.name}>
+                                            <GraphCard
+                                                item={item}
+                                                menus={menus}
+                                            />
+                                        </Col>
+                                    );
+                                })}
+                            </Row>
+                            <br />
+                            <Row justify='end'>
+                                <Col>
+                                    <Pagination
+                                        current={pagination.current}
+                                        pageSize={pagination.pageSize}
+                                        total={pagination.total}
+                                        onChange={handlePagination}
+                                    />
+                                </Col>
+                            </Row>
+                        </>
+                    )
+                    : (
+                        <>
+                            {graphCreateEnabled && (
+                                <>
+                                    <Row>
+                                        <Col>
+                                            <Button onClick={showEditLayer} type='primary'>
+                                                {t('graph.create')}
+                                            </Button>
+                                        </Col>
+                                    </Row>
+                                    <br />
+                                </>
+                            )}
+                            <Table
+                                columns={columns}
+                                dataSource={data}
+                                pagination={pagination}
+                                onChange={handleTable}
+                            />
+                        </>
+                    )
+                }
+                <EditLayer
+                    visible={editLayer}
+                    onCancel={handleHideEditLayer}
+                    graphspace={graphspace}
+                    refresh={handleRefresh}
+                    graph={selectGraph}
+                />
+                <ViewLayer
+                    visible={viewLayer}
+                    onCancel={handleHideViewLayer}
+                    graph={selectGraph}
+                    graphspace={graphspace}
+                />
+                <ClearGraphConfirmModal
+                    open={Boolean(clearSelection)}
+                    graphspace={graphspace}
+                    graph={clearSelection?.graph || ''}
+                    onCancel={handleClearCancel}
+                    onSuccess={handleClearSuccess}
+                    onConfirm={handleClearConfirm}
+                />
+            </div>
+        </Spin>
+    );
+};
+
+export default Graph;

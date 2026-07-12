@@ -46,6 +46,14 @@ import java.util.stream.Collectors;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
+
 import org.apache.hugegraph.config.HugeConfig;
 import org.apache.hugegraph.entity.enums.FileMappingStatus;
 import org.apache.hugegraph.entity.load.FileMapping;
@@ -59,14 +67,6 @@ import org.apache.hugegraph.options.HubbleOptions;
 import org.apache.hugegraph.util.Ex;
 import org.apache.hugegraph.util.HubbleUtil;
 import org.apache.hugegraph.util.StringUtil;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Isolation;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.multipart.MultipartFile;
-
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
@@ -103,9 +103,20 @@ public class FileMappingService {
         return this.mapper.selectById(id);
     }
 
-    public FileMapping get(int connId, int jobId, String fileName) {
+    public FileMapping get(String graphSpace, String graph, int jobId, int id) {
         QueryWrapper<FileMapping> query = Wrappers.query();
-        query.eq("conn_id", connId)
+        query.eq("id", id)
+             .eq("graphspace", graphSpace)
+             .eq("graph", graph)
+             .eq("job_id", jobId);
+        return this.mapper.selectOne(query);
+    }
+
+    public FileMapping get(String graphSpace, String graph, int jobId,
+                           String fileName) {
+        QueryWrapper<FileMapping> query = Wrappers.query();
+        query.eq("graphspace", graphSpace)
+             .eq("graph", graph)
              .eq("job_id", jobId)
              .eq("name", fileName);
         return this.mapper.selectOne(query);
@@ -121,9 +132,20 @@ public class FileMappingService {
         return this.mapper.selectList(query);
     }
 
-    public IPage<FileMapping> list(int connId, int jobId, int pageNo, int pageSize) {
+    public List<FileMapping> listByJob(String graphSpace, String graph,
+                                       int jobId) {
         QueryWrapper<FileMapping> query = Wrappers.query();
-        query.eq("conn_id", connId);
+        query.eq("graphspace", graphSpace)
+             .eq("graph", graph)
+             .eq("job_id", jobId);
+        return this.mapper.selectList(query);
+    }
+
+    public IPage<FileMapping> list(String graphSpace, String graph, int jobId,
+                                   int pageNo, int pageSize) {
+        QueryWrapper<FileMapping> query = Wrappers.query();
+        query.eq("graphspace", graphSpace);
+        query.eq("graph", graph);
         query.eq("job_id", jobId);
         query.eq("file_status", FileMappingStatus.COMPLETED.getValue());
         query.orderByDesc("create_time");
@@ -157,11 +179,11 @@ public class FileMappingService {
                HubbleUtil.nowTime().getEpochSecond();
     }
 
-    public FileUploadResult uploadFile(MultipartFile srcFile, int index,
-                                       String dirPath) {
+    public FileUploadResult uploadFile(MultipartFile srcFile, String fileName,
+                                       int index, String dirPath) {
         FileUploadResult result = new FileUploadResult();
         // Current part saved path
-        String partName = srcFile.getOriginalFilename();
+        String partName = fileName;
         result.setName(partName);
         result.setSize(srcFile.getSize());
 
@@ -202,7 +224,18 @@ public class FileMappingService {
 
         File newFile = new File(dir.getPath() + ".all");
         File destFile = new File(dir.getPath());
+        if (newFile.exists()) {
+            try {
+                FileUtils.forceDelete(newFile);
+            } catch (IOException e) {
+                log.error("Failed to delete stale merged upload file {}",
+                          newFile, e);
+                throw new InternalException("load.upload.delete-temp-dir.failed",
+                                            e);
+            }
+        }
         if (partFiles.length == 1) {
+            this.checkPartFileIndex(partFiles[0], 0);
             try {
                 // Rename file to dest file
                 FileUtils.moveFile(partFiles[0], newFile);
@@ -221,16 +254,17 @@ public class FileMappingService {
                 Integer idx2 = Integer.valueOf(file2Idx);
                 return idx1.compareTo(idx2);
             });
-            try (OutputStream os = new FileOutputStream(newFile, true)) {
+            try (OutputStream os = new FileOutputStream(newFile, false)) {
                 for (int i = 0; i < partFiles.length; i++) {
                     File partFile = partFiles[i];
+                    this.checkPartFileIndex(partFile, i);
                     try (InputStream is = new FileInputStream(partFile)) {
                         IOUtils.copy(is, os);
                     } catch (IOException e) {
                         log.error("Failed to copy file stream from {} to {}",
                                   partFile, newFile, e);
                         throw new InternalException(
-                                "load.upload.merge-file.failed", e);
+                                  "load.upload.merge-file.failed", e);
                     }
                 }
             } catch (IOException e) {
@@ -251,6 +285,20 @@ public class FileMappingService {
             throw new InternalException("load.upload.rename-file.failed");
         }
         return true;
+    }
+
+    private void checkPartFileIndex(File partFile, int expectedIndex) {
+        String fileIdx = StringUtils.substringAfterLast(partFile.getName(),
+                                                        "-");
+        try {
+            int actualIndex = Integer.parseInt(fileIdx);
+            if (actualIndex == expectedIndex) {
+                return;
+            }
+        } catch (NumberFormatException ignored) {
+            // Fall through to a uniform error below.
+        }
+        throw new InternalException("load.upload.merge-file.failed");
     }
 
     public void extractColumns(FileMapping mapping) {
@@ -297,7 +345,11 @@ public class FileMappingService {
             throw new InternalException("Failed to read header and sample " +
                                         "data from file '%s'", file);
         } finally {
-            IOUtils.closeQuietly(reader);
+            try {
+                reader.close();
+            } catch (IOException ignored) {
+                log.debug("Failed to close file mapping reader", ignored);
+            }
         }
 
         setting.setColumnNames(Arrays.asList(columnNames));
@@ -315,7 +367,7 @@ public class FileMappingService {
         } catch (IOException e) {
             this.remove(mapping.getId());
             throw new InternalException(
-                    "Failed to move file to next level directory");
+                      "Failed to move file to next level directory");
         }
         return Paths.get(destPath, currFile.getName()).toString();
     }
@@ -354,7 +406,7 @@ public class FileMappingService {
         query.in("file_status", FileMappingStatus.UPLOADING.getValue());
         List<FileMapping> mappings = this.mapper.selectList(query);
         long threshold = this.config.get(
-                HubbleOptions.UPLOAD_FILE_MAX_TIME_CONSUMING) * 1000;
+                         HubbleOptions.UPLOAD_FILE_MAX_TIME_CONSUMING) * 1000;
         Date now = HubbleUtil.nowDate();
         for (FileMapping mapping : mappings) {
             Date updateTime = mapping.getUpdateTime();

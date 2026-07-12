@@ -29,12 +29,14 @@
         <release.name>${project.parent.artifactId}</release.name>
         <final.name>apache-${release.name}-${project.version}</final.name>
         <top.level.dir>${project.basedir}/..</top.level.dir>
+        <repo.root.dir>${top.level.dir}/..</repo.root.dir>
         <current.basedir>${project.basedir}</current.basedir>
         <assembly.dir>${current.basedir}/assembly</assembly.dir>
         <assembly.descriptor.dir>${assembly.dir}/descriptor</assembly.descriptor.dir>
         <assembly.static.dir>${assembly.dir}/static</assembly.static.dir>
+        <release.docs.dir>${repo.root.dir}/hugegraph-dist/release-docs</release.docs.dir>
         <hubble-fe.dir>${project.basedir}/../hubble-fe</hubble-fe.dir>
-        <build.node.version>v16.20.2</build.node.version>
+        <build.node.version>v18.20.8</build.node.version>
         <build.yarn.version>v1.22.21</build.yarn.version>
     </properties>
 
@@ -43,6 +45,19 @@
             <groupId>org.apache.hugegraph</groupId>
             <artifactId>hubble-be</artifactId>
             <version>${revision}</version>
+            <exclusions>
+                <!-- Exclude log4j-slf4j-impl to prevent conflict with
+                     Spring Boot's logback + log4j-to-slf4j logging stack.
+                     log4j-slf4j-impl and log4j-to-slf4j cannot coexist. -->
+                <exclusion>
+                    <groupId>org.apache.logging.log4j</groupId>
+                    <artifactId>log4j-slf4j-impl</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-log4j2</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
     </dependencies>
 
@@ -88,9 +103,6 @@
                         <configuration>
                             <nodeVersion>${build.node.version}</nodeVersion>
                             <yarnVersion>${build.yarn.version}</yarnVersion>
-                            <nodeDownloadRoot>https://mirrors.aliyun.com/nodejs-release/</nodeDownloadRoot>
-                            <yarnDownloadRoot>https://repo.huaweicloud.com/yarn/</yarnDownloadRoot>
-                            <npmRegistryURL>https://registry.npmmirror.com</npmRegistryURL>
                         </configuration>
                     </execution>
 
@@ -100,7 +112,7 @@
                             <goal>yarn</goal>
                         </goals>
                         <configuration>
-                            <arguments>install --network-timeout 600000</arguments>
+                            <arguments>install --frozen-lockfile --network-timeout 600000 --prefer-offline --ignore-engines</arguments>
                         </configuration>
                     </execution>
 
@@ -111,6 +123,10 @@
                         </goals>
                         <configuration>
                             <arguments>build</arguments>
+                            <environmentVariables>
+                                <CI>true</CI>
+                                <NODE_OPTIONS>--max-old-space-size=4096</NODE_OPTIONS>
+                            </environmentVariables>
                         </configuration>
                     </execution>
                 </executions>
@@ -128,13 +144,23 @@
                                 <!-- TODO: change to assembly plugin in future  -->
                                 <echo file="${top.level.dir}/dist.sh">
                                     cd ${hubble-fe.dir} || exit 1
-                                    export CI=false
+                                    export CI=true
 
                                     cd ${top.level.dir} &amp;&amp; pwd
                                     rm -rf ${final.name}/ui
                                     cp -r ${hubble-fe.dir}/build ${final.name}/ui
+                                    rm -rf ${final.name}/logs
+                                    rm -rf ${final.name}/upload-files
+                                    rm -f ${final.name}/db.mv.db
+                                    rm -f ${final.name}/db.trace.db
+                                    rm -f ${final.name}/*.pid
+                                    rm -f ${final.name}/bin/pid
+                                    find ${final.name}/ui -name "*.map" -type f -delete
 
                                     tar -zcvf ${top.level.dir}/target/${final.name}.tar.gz ${final.name} || exit 1
+                                    bash ${assembly.dir}/travis/check-hubble-dist.sh \
+                                         ${top.level.dir}/target/${final.name}.tar.gz || exit 1
+                                    rm -rf ./hubble-dist/${final.name}
                                     cp -r ${final.name} ./hubble-dist
                                     echo -n "${final.name} tar.gz available at: "
                                     echo "${top.level.dir}/target/${final.name}.tar.gz"

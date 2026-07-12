@@ -18,16 +18,18 @@
 
 package org.apache.hugegraph.service.query;
 
-import org.apache.hugegraph.entity.query.GremlinCollection;
-import org.apache.hugegraph.exception.InternalException;
-import org.apache.hugegraph.mapper.query.GremlinCollectionMapper;
-import org.apache.hugegraph.util.SQLUtil;
+import com.google.common.collect.ImmutableMap;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import org.apache.hugegraph.driver.HugeClient;
+import org.apache.hugegraph.entity.query.GremlinCollection;
+import org.apache.hugegraph.exception.InternalException;
+import org.apache.hugegraph.mapper.query.GremlinCollectionMapper;
+import org.apache.hugegraph.util.SQLUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
@@ -39,49 +41,73 @@ public class GremlinCollectionService {
     @Autowired
     private GremlinCollectionMapper mapper;
 
-    public IPage<GremlinCollection> list(int connId, String content,
+    public IPage<GremlinCollection> list(HugeClient client, String content,
+                                         String type,
                                          Boolean nameOrderAsc,
                                          Boolean timeOrderAsc,
                                          long current, long pageSize) {
         QueryWrapper<GremlinCollection> query = Wrappers.query();
+        String graphSpace = client.getGraphSpaceName();
+        String graph = client.getGraphName();
         IPage<GremlinCollection> page = new Page<>(current, pageSize);
         if (!StringUtils.isEmpty(content)) {
             // Select by content
             String value = SQLUtil.escapeLike(content);
             if (nameOrderAsc != null) {
                 // order by name
-                assert timeOrderAsc == null;
-                query.eq("conn_id", connId).and(wrapper -> {
-                    wrapper.like("name", value).or().like("content", value);
-                });
+                checkSingleOrder(nameOrderAsc, timeOrderAsc);
+                query.eq("graphspace", graphSpace)
+                     .eq("graph", graph)
+                     .eq("type", type).and(wrapper -> {
+                         wrapper.like("name", value).or()
+                                .like("content", value);
+                     });
                 query.orderBy(true, nameOrderAsc, "name");
                 return this.mapper.selectPage(page, query);
             } else if (timeOrderAsc != null) {
                 // order by time
-                assert nameOrderAsc == null;
-                query.eq("conn_id", connId).and(wrapper -> {
-                    wrapper.like("name", value).or().like("content", value);
-                });
+                checkSingleOrder(nameOrderAsc, timeOrderAsc);
+                query.eq("graphspace", graphSpace)
+                     .eq("graph", graph)
+                     .eq("type", type).and(wrapper -> {
+                         wrapper.like("name", value).or()
+                                .like("content", value);
+                     });
                 query.orderBy(true, timeOrderAsc, "create_time");
                 return this.mapper.selectPage(page, query);
             } else {
                 // order by relativity
-                assert nameOrderAsc == null && timeOrderAsc == null;
-                return this.mapper.selectByContentInPage(page, connId, content);
+                checkSingleOrder(nameOrderAsc, timeOrderAsc);
+                return this.mapper.selectByContentInPage(page, graphSpace, graph,
+                                                         content, type);
             }
         } else {
             // Select all
             if (nameOrderAsc != null) {
                 // order by name
-                assert timeOrderAsc == null;
-                query.eq("conn_id", connId).orderBy(true, nameOrderAsc, "name");
+                checkSingleOrder(nameOrderAsc, timeOrderAsc);
+                query.eq("graphspace", graphSpace)
+                     .eq("graph", graph)
+                        .eq("type", type)
+                     .orderBy(true, nameOrderAsc, "name");
                 return this.mapper.selectPage(page, query);
             } else {
                 // order by time
                 boolean isAsc = timeOrderAsc != null && timeOrderAsc;
-                query.eq("conn_id", connId).orderBy(true, isAsc, "create_time");
+                query.eq("graphspace", graphSpace)
+                     .eq("graph", graph)
+                        .eq("type", type)
+                     .orderBy(true, isAsc, "create_time");
                 return this.mapper.selectPage(page, query);
             }
+        }
+    }
+
+    private static void checkSingleOrder(Boolean nameOrderAsc,
+                                         Boolean timeOrderAsc) {
+        if (nameOrderAsc != null && timeOrderAsc != null) {
+            throw new InternalException("Only one gremlin collection order " +
+                                        "field can be specified");
         }
     }
 
@@ -89,10 +115,13 @@ public class GremlinCollectionService {
         return this.mapper.selectById(id);
     }
 
-    public GremlinCollection getByName(int connId, String name) {
+    public GremlinCollection getByName(String graphSpace, String graph,
+                                       String name, String type) {
         QueryWrapper<GremlinCollection> query = Wrappers.query();
-        query.eq("conn_id", connId);
+        query.eq("graphspace", graphSpace);
+        query.eq("graph", graph);
         query.eq("name", name);
+        query.eq("type", type);
         return this.mapper.selectOne(query);
     }
 
@@ -119,5 +148,11 @@ public class GremlinCollectionService {
         if (this.mapper.deleteById(id) != 1) {
             throw new InternalException("entity.delete.failed", id);
         }
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public void deleteByGraph(String graphSpace, String graph) {
+        this.mapper.deleteByMap(ImmutableMap.of("graphspace", graphSpace,
+                                                "graph", graph));
     }
 }

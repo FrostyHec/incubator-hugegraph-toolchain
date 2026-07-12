@@ -18,6 +18,7 @@
 package org.apache.hugegraph.api.graphs;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -74,7 +75,8 @@ public class GraphsAPI extends API {
     @SuppressWarnings("unchecked")
     public Map<String, String> create(String name, String cloneGraphName, String configText) {
         this.client.checkApiVersion("0.67", "dynamic graph add");
-        RestHeaders headers = new RestHeaders().add(RestHeaders.CONTENT_TYPE, "text/plain");
+        RestHeaders headers = new RestHeaders().add(RestHeaders.CONTENT_TYPE,
+                                                    RestHeaders.APPLICATION_JSON);
         Map<String, Object> params = null;
         if (StringUtils.isNotEmpty(cloneGraphName)) {
             params = ImmutableMap.of("clone_graph_name", cloneGraphName);
@@ -108,19 +110,20 @@ public class GraphsAPI extends API {
         return profiles;
     }
 
-    public Map<String, String> setDefault(String name) {
+    public Map<String, Object> setDefault(String name) {
         String defaultPath = joinPath(this.path(), name, "default");
-        RestResult result = this.client.get(defaultPath);
+        RestResult result = this.client.post(defaultPath, Collections.emptyMap());
         return result.readObject(Map.class);
     }
 
-    public Map<String, String> unSetDefault(String name) {
-        String unDefaultPath = joinPath(this.path(), name, "undefault");
-        RestResult result = this.client.get(unDefaultPath);
+    public Map<String, Object> unSetDefault(String name) {
+        String unDefaultPath = joinPath(this.path(), name, "default");
+        RestResult result = this.client.delete(unDefaultPath,
+                                                Collections.emptyMap());
         return result.readObject(Map.class);
     }
 
-    public Map<String, String> getDefault() {
+    public Map<String, Object> getDefault() {
         String defaultPath = joinPath(this.path(), "default");
         RestResult result = this.client.get(defaultPath);
         return result.readObject(Map.class);
@@ -169,6 +172,11 @@ public class GraphsAPI extends API {
                            ImmutableMap.of(CONFIRM_MESSAGE, message));
     }
 
+    /**
+     * @deprecated Current Server per-graph management accepts only update.
+     *             Use {@link #reload()} for a whole-server graph reload.
+     */
+    @Deprecated
     public Map<String, String> reload(String name) {
         RestResult result = this.client.put(this.path(), name,
                                             ImmutableMap.of("action", "reload"));
